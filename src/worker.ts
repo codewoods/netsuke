@@ -9,7 +9,7 @@ import { Container, getRandom } from "@cloudflare/containers";
 
 import { validateAccessRequest, type AccessEnv } from "./access";
 
-const CONTAINER_INSTANCE_COUNT = 2;
+const CONTAINER_INSTANCE_COUNT = 1;
 
 export class PdfConverter extends Container<Env> {
   // Container listens on port 8000 inside the image (uvicorn).
