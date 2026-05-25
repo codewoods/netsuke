@@ -1,0 +1,13 @@
+.venv
+.git
+.pytest_cache
+.mypy_cache
+__pycache__
+*.pyc
+tests/
+Adobe ICC Profiles (end-user)/
+.wrangler/
+node_modules/
+*.md
+test_hex.html
+w3.css

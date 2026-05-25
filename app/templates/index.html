@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>netsuke | RGB to CMYK PDF</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --fg: #1a1a1a;
+      --bg: #fafafa;
+      --accent: #008f96;
+      --border: #d4d4d4;
+      --muted: #888;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --fg: #eaeaea; --bg: #181818; --border: #3a3a3a; }
+    }
+    * { box-sizing: border-box; }
+    body {
+      font: 15px/1.5 system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
+      color: var(--fg); background: var(--bg);
+      max-width: 880px; margin: 3rem auto; padding: 0 1.25rem;
+    }
+    h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+    p.lead { color: var(--muted); margin: 0 0 2rem; }
+    label { display: block; font-weight: 600; margin: 1rem 0 0.35rem; }
+    select, input[type=file] {
+      width: 100%; padding: 0.55rem 0.7rem; font-size: 0.95rem;
+      background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 6px;
+    }
+    select:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    button {
+      margin-top: 1.5rem; width: 100%;
+      padding: 0.7rem 1rem; font-size: 1rem; font-weight: 600;
+      background: var(--accent); color: white;
+      border: none; border-radius: 6px; cursor: pointer;
+    }
+    button:hover { filter: brightness(1.08); }
+    button:disabled { opacity: 0.5; cursor: progress; }
+    small.hint { color: var(--muted); display: block; margin-top: 0.3rem; font-weight: normal; }
+    #status { margin-top: 1rem; min-height: 1.4em; font-size: 0.9rem; }
+    .err { color: #c0392b; }
+    .ok { color: #008f96; }
+    .row { display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem; }
+    .row input[type=checkbox] { width: auto; }
+    .row label { margin: 0; font-weight: 600; }
+    #preview {
+      margin-top: 2rem; display: none;
+      grid-template-columns: repeat(2, 1fr); gap: 1rem;
+    }
+    #preview.on { display: grid; }
+    .pv {
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 0.5rem; background: var(--bg);
+    }
+    .pv h3 { margin: 0 0 0.4rem; font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+    .pv canvas { width: 100%; height: auto; display: block; background: white; }
+    .pv .de { font-size: 0.78rem; color: var(--muted); margin-top: 0.3rem;
+              font-family: ui-monospace, Menlo, monospace; }
+    .pv .de strong { color: var(--fg); }
+    nav { margin-bottom: 1rem; }
+    nav a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <h1>RGB to CMYK PDF</h1>
+  <p class="lead">上傳 PDF 或圖片（jpg/png/tiff/webp）→ 套 ICC → 下載 CMYK PDF。</p>
+  <nav><a href="/picker">→ Color Picker (hex &lt;-&gt; CMYK + APCA)</a></nav>
+
+  <form id="form">
+    <label for="paper">紙質 Paper</label>
+    <select id="paper" name="paper">
+      {% for key, label in paper_labels.items() %}
+        <option value="{{ key }}" {% if key == default_paper %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="icc">ICC profile</label>
+    <select id="icc" name="icc">
+      {% for p in profiles %}
+        <option value="{{ p.filename }}" {% if p.filename == default_icc %}selected{% endif %}>
+          {{ p.display }} ({{ p.region }})
+        </option>
+      {% endfor %}
+    </select>
+    <small class="hint">預設：Japan Color 2011 Coated (JPMA/X-Rite，繁中/日韓區域 coated 紙公開等價)</small>
+
+    <label for="file">PDF / 圖片</label>
+    <input id="file" type="file" name="file"
+           accept="application/pdf,image/jpeg,image/png,image/tiff,image/webp,image/bmp"
+           required>
+    <small class="hint">支援 .pdf .jpg .jpeg .png .tif .tiff .webp .bmp</small>
+
+    <div class="row">
+      <input id="cbpreview" type="checkbox">
+      <label for="cbpreview">轉換後顯示色盲預覽（normal / 紅盲 / 綠盲 / 藍盲）</label>
+    </div>
+
+    <button id="submit" type="submit">轉換並下載</button>
+    <div id="status" role="status" aria-live="polite"></div>
+  </form>
+
+  <section id="preview" aria-label="color-blind preview">
+    <div class="pv"><h3>原色 Normal</h3><canvas data-mode="normal"></canvas>
+      <div class="de" data-de="normal"></div></div>
+    <div class="pv"><h3>紅盲 Protanopia</h3><canvas data-mode="protanopia"></canvas>
+      <div class="de" data-de="protanopia"></div></div>
+    <div class="pv"><h3>綠盲 Deuteranopia</h3><canvas data-mode="deuteranopia"></canvas>
+      <div class="de" data-de="deuteranopia"></div></div>
+    <div class="pv"><h3>藍盲 Tritanopia</h3><canvas data-mode="tritanopia"></canvas>
+      <div class="de" data-de="tritanopia"></div></div>
+  </section>
+
+  <script>
+    // Brettel/Vienot dichromat simulation matrices in linear sRGB.
+    // Applied per pixel after de-gamma; result re-encoded to sRGB.
+    const SIM = {
+      normal:      [[1,0,0],[0,1,0],[0,0,1]],
+      protanopia:  [[0.567,0.433,0.000],[0.558,0.442,0.000],[0.000,0.242,0.758]],
+      deuteranopia:[[0.625,0.375,0.000],[0.700,0.300,0.000],[0.000,0.300,0.700]],
+      tritanopia:  [[0.950,0.050,0.000],[0.000,0.433,0.567],[0.000,0.475,0.525]],
+    };
+
+    const SRGB_TO_LIN = new Float32Array(256);
+    const LIN_TO_SRGB = new Uint8ClampedArray(4096);
+    for (let i = 0; i < 256; i++) {
+      const s = i / 255;
+      SRGB_TO_LIN[i] = s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    }
+    for (let i = 0; i < 4096; i++) {
+      const l = i / 4095;
+      const v = l <= 0.0031308 ? l * 12.92 : 1.055 * Math.pow(l, 1/2.4) - 0.055;
+      LIN_TO_SRGB[i] = Math.round(Math.max(0, Math.min(1, v)) * 255);
+    }
+
+    function applySim(srcImageData, matrix) {
+      // Apply 3x3 matrix in linear-RGB space to simulate dichromacy.
+      const d = srcImageData.data;
+      const out = new ImageData(srcImageData.width, srcImageData.height);
+      const o = out.data;
+      const [m0, m1, m2] = matrix;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = SRGB_TO_LIN[d[i]], g = SRGB_TO_LIN[d[i+1]], b = SRGB_TO_LIN[d[i+2]];
+        const nr = r*m0[0] + g*m0[1] + b*m0[2];
+        const ng = r*m1[0] + g*m1[1] + b*m1[2];
+        const nb = r*m2[0] + g*m2[1] + b*m2[2];
+        o[i  ] = LIN_TO_SRGB[Math.max(0, Math.min(4095, Math.round(nr * 4095)))];
+        o[i+1] = LIN_TO_SRGB[Math.max(0, Math.min(4095, Math.round(ng * 4095)))];
+        o[i+2] = LIN_TO_SRGB[Math.max(0, Math.min(4095, Math.round(nb * 4095)))];
+        o[i+3] = d[i+3];
+      }
+      return out;
+    }
+
+    async function renderPreview(pdfBlob) {
+      // POST the converted PDF back to /preview to get a server rendered PNG,
+      // then paint normal plus 3 dichromat simulations into the canvases.
+      const fd = new FormData();
+      fd.append('file', new File([pdfBlob], 'out.pdf', { type: 'application/pdf' }));
+      const res = await fetch('/preview', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error('preview render failed');
+      const png = await res.blob();
+      const url = URL.createObjectURL(png);
+      const img = new Image();
+      await new Promise((ok, fail) => { img.onload = ok; img.onerror = fail; img.src = url; });
+      URL.revokeObjectURL(url);
+
+      const off = document.createElement('canvas');
+      off.width = img.naturalWidth; off.height = img.naturalHeight;
+      const octx = off.getContext('2d');
+      octx.drawImage(img, 0, 0);
+      const src = octx.getImageData(0, 0, off.width, off.height);
+
+      // Render each canvas and (where applicable) compute mean/max ΔE2000
+      // between the simulated image and the normal-vision baseline.
+      const stats = computeDeltaE(src);
+      for (const cv of document.querySelectorAll('#preview canvas')) {
+        cv.width = off.width; cv.height = off.height;
+        const ctx = cv.getContext('2d');
+        const mode = cv.dataset.mode;
+        ctx.putImageData(mode === 'normal' ? src : applySim(src, SIM[mode]), 0, 0);
+      }
+      for (const el of document.querySelectorAll('#preview .de')) {
+        const mode = el.dataset.de;
+        el.replaceChildren();
+        if (mode === 'normal') {
+          el.append(document.createTextNode('baseline'));
+        } else {
+          const s = stats[mode];
+          const b = document.createElement('strong');
+          b.textContent = 'ΔE2000 ';
+          el.append(b, document.createTextNode(
+            'mean ' + s.mean.toFixed(1) + '  max ' + s.max.toFixed(1)
+          ));
+        }
+      }
+      document.getElementById('preview').classList.add('on');
+    }
+
+    // --- ΔE2000 in Lab space; subsample for speed (every Nth pixel). ---
+    function rgbToLab(r, g, b) {
+      // sRGB -> linear -> XYZ (D65) -> Lab. Constants are CIE standard.
+      const lin = (v) => { v /= 255; return v <= 0.04045 ? v/12.92 : Math.pow((v+0.055)/1.055, 2.4); };
+      const R = lin(r), G = lin(g), B = lin(b);
+      let X = (R*0.4124564 + G*0.3575761 + B*0.1804375) / 0.95047;
+      let Y = (R*0.2126729 + G*0.7151522 + B*0.0721750) / 1.0;
+      let Z = (R*0.0193339 + G*0.1191920 + B*0.9503041) / 1.08883;
+      const f = (t) => t > 0.008856 ? Math.cbrt(t) : (7.787*t + 16/116);
+      const fx = f(X), fy = f(Y), fz = f(Z);
+      return [116*fy - 16, 500*(fx - fy), 200*(fy - fz)];
+    }
+    function deltaE2000(lab1, lab2) {
+      // Standard CIEDE2000 (Sharma et al. 2005 reference implementation).
+      const [L1,a1,b1] = lab1, [L2,a2,b2] = lab2;
+      const avgL = (L1+L2)/2;
+      const C1 = Math.hypot(a1,b1), C2 = Math.hypot(a2,b2);
+      const avgC = (C1+C2)/2;
+      const G = 0.5*(1 - Math.sqrt(Math.pow(avgC,7)/(Math.pow(avgC,7)+Math.pow(25,7))));
+      const a1p = a1*(1+G), a2p = a2*(1+G);
+      const C1p = Math.hypot(a1p,b1), C2p = Math.hypot(a2p,b2);
+      const avgCp = (C1p+C2p)/2;
+      const h = (a,b) => { const v = Math.atan2(b,a)*180/Math.PI; return v < 0 ? v+360 : v; };
+      const h1p = (a1p===0 && b1===0) ? 0 : h(a1p,b1);
+      const h2p = (a2p===0 && b2===0) ? 0 : h(a2p,b2);
+      let dhp;
+      if (C1p*C2p === 0) dhp = 0;
+      else {
+        dhp = h2p - h1p;
+        if (dhp > 180) dhp -= 360; else if (dhp < -180) dhp += 360;
+      }
+      const dLp = L2 - L1;
+      const dCp = C2p - C1p;
+      const dHp = 2*Math.sqrt(C1p*C2p)*Math.sin(dhp*Math.PI/360);
+      let avgHp;
+      if (C1p*C2p === 0) avgHp = h1p+h2p;
+      else {
+        avgHp = (h1p+h2p)/2;
+        if (Math.abs(h1p-h2p) > 180) avgHp += 180;
+      }
+      const T = 1 - 0.17*Math.cos((avgHp-30)*Math.PI/180)
+                  + 0.24*Math.cos((2*avgHp)*Math.PI/180)
+                  + 0.32*Math.cos((3*avgHp+6)*Math.PI/180)
+                  - 0.20*Math.cos((4*avgHp-63)*Math.PI/180);
+      const dTheta = 30*Math.exp(-Math.pow((avgHp-275)/25,2));
+      const Rc = 2*Math.sqrt(Math.pow(avgCp,7)/(Math.pow(avgCp,7)+Math.pow(25,7)));
+      const Sl = 1 + (0.015*Math.pow(avgL-50,2))/Math.sqrt(20+Math.pow(avgL-50,2));
+      const Sc = 1 + 0.045*avgCp;
+      const Sh = 1 + 0.015*avgCp*T;
+      const Rt = -Math.sin(2*dTheta*Math.PI/180)*Rc;
+      return Math.sqrt(
+        Math.pow(dLp/Sl,2) + Math.pow(dCp/Sc,2) + Math.pow(dHp/Sh,2)
+        + Rt*(dCp/Sc)*(dHp/Sh)
+      );
+    }
+    function computeDeltaE(src) {
+      // Sample every STRIDE pixels for speed; on a ~1 MP image this is
+      // ~60k samples per mode, fast enough for an interactive callback.
+      const d = src.data;
+      const STRIDE = 16;
+      const modes = ['protanopia', 'deuteranopia', 'tritanopia'];
+      const acc = Object.fromEntries(modes.map((m) => [m, { sum: 0, max: 0, n: 0 }]));
+      for (let i = 0; i < d.length; i += 4 * STRIDE) {
+        const lab0 = rgbToLab(d[i], d[i+1], d[i+2]);
+        for (const m of modes) {
+          const mat = SIM[m];
+          const r = SRGB_TO_LIN[d[i]], g = SRGB_TO_LIN[d[i+1]], b = SRGB_TO_LIN[d[i+2]];
+          const nr = r*mat[0][0] + g*mat[0][1] + b*mat[0][2];
+          const ng = r*mat[1][0] + g*mat[1][1] + b*mat[1][2];
+          const nb = r*mat[2][0] + g*mat[2][1] + b*mat[2][2];
+          const sr = LIN_TO_SRGB[Math.max(0,Math.min(4095,Math.round(nr*4095)))];
+          const sg = LIN_TO_SRGB[Math.max(0,Math.min(4095,Math.round(ng*4095)))];
+          const sb = LIN_TO_SRGB[Math.max(0,Math.min(4095,Math.round(nb*4095)))];
+          const lab1 = rgbToLab(sr, sg, sb);
+          const dE = deltaE2000(lab0, lab1);
+          const a = acc[m];
+          a.sum += dE; a.n += 1; if (dE > a.max) a.max = dE;
+        }
+      }
+      return Object.fromEntries(
+        modes.map((m) => [m, { mean: acc[m].sum / acc[m].n, max: acc[m].max }])
+      );
+    }
+
+    const paperSel = document.getElementById('paper');
+    const iccSel = document.getElementById('icc');
+    const form = document.getElementById('form');
+    const btn = document.getElementById('submit');
+    const status = document.getElementById('status');
+    const cbpreview = document.getElementById('cbpreview');
+
+    async function loadIcc(paper) {
+      const res = await fetch('/icc?paper=' + encodeURIComponent(paper));
+      if (!res.ok) { status.textContent = 'ICC 載入失敗'; status.className = 'err'; return; }
+      const profiles = await res.json();
+      iccSel.innerHTML = '';
+      for (const p of profiles) {
+        const opt = document.createElement('option');
+        opt.value = p.filename;
+        opt.textContent = p.display + ' (' + p.region + ')';
+        if (p.default) opt.selected = true;
+        iccSel.appendChild(opt);
+      }
+    }
+
+    paperSel.addEventListener('change', () => loadIcc(paperSel.value));
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      btn.disabled = true;
+      status.textContent = '轉換中...';
+      status.className = '';
+      document.getElementById('preview').classList.remove('on');
+
+      const fd = new FormData();
+      const fileEl = document.getElementById('file');
+      fd.append('file', fileEl.files[0]);
+      fd.append('icc', iccSel.value);
+
+      try {
+        const res = await fetch('/convert', { method: 'POST', body: fd });
+        if (!res.ok) {
+          const msg = await res.text();
+          throw new Error(msg || 'HTTP ' + res.status);
+        }
+        const blob = await res.blob();
+        const cd = res.headers.get('content-disposition') || '';
+        const m = /filename="?([^"]+)"?/.exec(cd);
+        const name = m ? m[1] : 'output_cmyk.pdf';
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name; a.click();
+        URL.revokeObjectURL(url);
+        status.textContent = '完成 ' + name;
+        status.className = 'ok';
+
+        if (cbpreview.checked) {
+          status.textContent = '完成 ' + name + '（產生預覽中...）';
+          try {
+            await renderPreview(blob);
+            status.textContent = '完成 ' + name;
+          } catch (perr) {
+            status.textContent = '完成 ' + name + '（預覽失敗：' + perr.message + '）';
+          }
+        }
+      } catch (err) {
+        status.textContent = '失敗 ' + err.message;
+        status.className = 'err';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

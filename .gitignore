@@ -1,0 +1,34 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# pytest / mypy / coverage
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Editor / OS
+.directory
+.DS_Store
+
+# Adobe ICC end-user pack: license docs not for redistribution.
+# Profiles themselves live in icc/ which IS checked in.
+Adobe ICC Profiles (end-user)/
+
+# Node / Wrangler
+node_modules/
+.wrangler/
+
+# Local secrets / env
+.dev.vars
+.env
+
+input/
+*.kate-swp
